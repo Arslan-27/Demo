@@ -91,6 +91,6 @@ st.sidebar.download_button(
         'Daily_Predicted_mL': [daily_interp(x) for x in pred_days],
         'Cumulative_Predicted_mL': [gompertz(x, Y_max, R_max, lag) for x in pred_days]
     }).to_csv(index=False),
-    file_name="biogas_predictions.csv",
+    file_name="Biogas_Production_12L_Distribution.csv",
     mime="text/csv"
 )
