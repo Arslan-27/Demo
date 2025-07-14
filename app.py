@@ -72,7 +72,7 @@ def polynomial_regression(x_data, y_data, degree=2):
             else:
                 return [sum_y / n, 0, 0]
         
-        c = (sum_y * sum_x2 * sum_x4 + sum_x * sum_x3 * sum_x2y + sum_x2 * sum_x3 * sum_xy - sum_x2 * sum_x2 * sum_x2y - sum_y * sum_x3 * sum_x3 - sum_x * sum_x2 * sum_x4) / det
+        c = (sum_y * sum_x2 * sum_x4 + sum_x * sum_x3 * sum_x2y + sum_x2 * sum_x3 * sum_xy - sum_x2 * sum_x2 * sum_x2y - sum_y * sum_x3 * sum_x3 - sum_x * sum_x * sum_x4) / det
         b = (n * sum_x2 * sum_x2y + sum_x * sum_x3 * sum_y + sum_x2 * sum_x * sum_xy - sum_x2 * sum_x2 * sum_y - n * sum_x3 * sum_xy - sum_x * sum_x * sum_x2y) / det
         a = (n * sum_x4 * sum_xy + sum_x * sum_x2 * sum_y + sum_x2 * sum_x3 * sum_xy - sum_x2 * sum_x2 * sum_xy - n * sum_x3 * sum_x2y - sum_x * sum_x4 * sum_y) / det
         
@@ -134,8 +134,8 @@ def fit_prediction_models(data):
         'days': days
     }
 
-def predict_daily_production(day, models, data):
-    """Predict daily production for a given day"""
+def predict_daily_production(day, models, data, substrate_amount=None):
+    """Predict daily production for a given day with optional substrate amount"""
     # Method 1: Polynomial prediction
     poly_pred = evaluate_polynomial(day, models['daily_coeffs'])
     
@@ -155,10 +155,17 @@ def predict_daily_production(day, models, data):
     
     # Average the predictions
     final_pred = (poly_pred + interp_pred + pattern_pred) / 3
+    
+    # Adjust prediction based on substrate amount if provided
+    if substrate_amount is not None:
+        # Simple scaling factor (adjust this based on your specific relationship)
+        substrate_factor = substrate_amount / 1000  # Assuming 1000g is the reference amount
+        final_pred *= substrate_factor
+    
     return max(0, final_pred)  # Ensure non-negative
 
-def predict_cumulative_production(day, models, data):
-    """Predict cumulative production for a given day"""
+def predict_cumulative_production(day, models, data, substrate_amount=None):
+    """Predict cumulative production for a given day with optional substrate amount"""
     # Method 1: Polynomial prediction
     poly_pred = evaluate_polynomial(day, models['cumulative_coeffs'])
     
@@ -168,7 +175,7 @@ def predict_cumulative_production(day, models, data):
     # Method 3: Sum of daily predictions
     daily_sum = 0
     for d in range(1, int(day) + 1):
-        daily_sum += predict_daily_production(d, models, data)
+        daily_sum += predict_daily_production(d, models, data, substrate_amount)
     
     # Average the predictions
     final_pred = (poly_pred + gompertz_pred + daily_sum) / 3
@@ -193,6 +200,17 @@ def main():
     st.sidebar.markdown("- Linear interpolation")
     st.sidebar.markdown("- Simplified Gompertz model")
     st.sidebar.markdown("- Pattern recognition")
+    
+    # Substrate input in sidebar
+    st.sidebar.header("🌱 Substrate Input")
+    substrate_amount = st.sidebar.number_input(
+        "Enter substrate amount (g):",
+        min_value=0.0,
+        max_value=10000.0,
+        value=1000.0,
+        step=100.0,
+        help="Adjust predictions based on substrate amount"
+    )
     
     # Display raw data
     with st.expander("📋 View Raw Data"):
@@ -219,10 +237,11 @@ def main():
         
         with col2:
             st.markdown("**Prediction Range:**")
-            st.markdown("• Days 1-30: Interpolated")
+            st.markdown("• Days 1-25: Based on actual data")
+            st.markdown("• Days 26-30: Estimated")
         
         # Make prediction
-        daily_pred = predict_daily_production(day, models, data)
+        daily_pred = predict_daily_production(day, models, data, substrate_amount)
         
         # Display results
         col1, col2, col3 = st.columns(3)
@@ -237,21 +256,26 @@ def main():
                     error = abs(daily_pred - actual_val)
                     st.metric("❌ Prediction Error", f"{error:.1f} mL")
                 else:
-                    st.metric("⚠️ Status", "Extrapolated")
+                    st.metric("⚠️ Status", "Estimated")
             else:
-                st.metric("⚠️ Status", "Extrapolated")
+                st.metric("⚠️ Status", "Estimated")
         
         with col3:
-            cumulative_pred = predict_cumulative_production(day, models, data)
+            cumulative_pred = predict_cumulative_production(day, models, data, substrate_amount)
             st.metric("📈 Cumulative by Day", f"{cumulative_pred:.0f} mL")
         
         # Create chart data for daily predictions
         chart_days = list(range(1, 31))
-        chart_predictions = [predict_daily_production(d, models, data) for d in chart_days]
+        chart_predictions = [predict_daily_production(d, models, data, substrate_amount) for d in chart_days]
+        
+        # Limit chart to days with actual data plus 5 days projection
+        max_chart_day = 25  # Only show actual data + 5 days projection
+        chart_days_limited = [d for d in chart_days if d <= max_chart_day]
+        chart_predictions_limited = chart_predictions[:max_chart_day]
         
         chart_data = pd.DataFrame({
-            'Day': chart_days,
-            'Predicted_Production': chart_predictions
+            'Day': chart_days_limited,
+            'Predicted_Production': chart_predictions_limited
         })
         
         # Add actual data to chart
@@ -262,20 +286,21 @@ def main():
         
         st.subheader("Daily Production Chart")
         
-        # Use Streamlit's native charting
-        combined_chart = pd.DataFrame({
-            'Day': chart_days,
-            'Predicted': chart_predictions
+        # Combine actual and predicted data
+        combined_data = pd.DataFrame({
+            'Day': chart_days_limited,
+            'Predicted': chart_predictions_limited,
+            'Actual': data['mL_Produced'][:len(chart_days_limited)]
         })
         
-        st.line_chart(combined_chart.set_index('Day'))
+        st.line_chart(combined_data.set_index('Day'))
         
         # Show actual vs predicted for first 25 days
         st.subheader("Actual vs Predicted (Days 1-25)")
         comparison_data = pd.DataFrame({
-            'Day': data['Day'],
-            'Actual': data['mL_Produced'],
-            'Predicted': [predict_daily_production(d, models, data) for d in data['Day']]
+            'Day': data['Day'][:25],
+            'Actual': data['mL_Produced'][:25],
+            'Predicted': [predict_daily_production(d, models, data, substrate_amount) for d in data['Day'][:25]]
         })
         
         st.line_chart(comparison_data.set_index('Day'))
@@ -285,7 +310,7 @@ def main():
         
         day = st.slider("Select day for cumulative prediction", 1, 30, 11, key="cumulative_slider")
         
-        cumulative_pred = predict_cumulative_production(day, models, data)
+        cumulative_pred = predict_cumulative_production(day, models, data, substrate_amount)
         
         col1, col2 = st.columns(2)
         
@@ -298,15 +323,19 @@ def main():
                 error = abs(cumulative_pred - actual_cumulative)
                 st.metric("❌ Prediction Error", f"{error:.0f} mL")
             else:
-                st.metric("⚠️ Status", "Extrapolated")
+                st.metric("⚠️ Status", "Estimated")
         
         # Create cumulative chart
         chart_days = list(range(1, 31))
-        cumulative_predictions = [predict_cumulative_production(d, models, data) for d in chart_days]
+        cumulative_predictions = [predict_cumulative_production(d, models, data, substrate_amount) for d in chart_days]
+        
+        # Limit to 25 days for better visualization
+        chart_days_limited = [d for d in chart_days if d <= 25]
+        cumulative_predictions_limited = cumulative_predictions[:25]
         
         cumulative_chart = pd.DataFrame({
-            'Day': chart_days,
-            'Predicted_Cumulative': cumulative_predictions
+            'Day': chart_days_limited,
+            'Predicted_Cumulative': cumulative_predictions_limited
         })
         
         st.subheader("Cumulative Production Chart")
@@ -320,9 +349,9 @@ def main():
             actual_cumulative_data.append(running_total)
         
         comparison_cumulative = pd.DataFrame({
-            'Day': data['Day'],
-            'Actual_Cumulative': actual_cumulative_data,
-            'Predicted_Cumulative': [predict_cumulative_production(d, models, data) for d in data['Day']]
+            'Day': data['Day'][:25],
+            'Actual_Cumulative': actual_cumulative_data[:25],
+            'Predicted_Cumulative': [predict_cumulative_production(d, models, data, substrate_amount) for d in data['Day'][:25]]
         })
         
         st.subheader("Actual vs Predicted Cumulative (Days 1-25)")
@@ -391,13 +420,14 @@ def main():
     
     # Generate prediction data
     export_days = list(range(1, 31))
-    daily_predictions = [predict_daily_production(d, models, data) for d in export_days]
-    cumulative_predictions = [predict_cumulative_production(d, models, data) for d in export_days]
+    daily_predictions = [predict_daily_production(d, models, data, substrate_amount) for d in export_days]
+    cumulative_predictions = [predict_cumulative_production(d, models, data, substrate_amount) for d in export_days]
     
     export_data = pd.DataFrame({
         'Day': export_days,
         'Daily_Predicted_mL': daily_predictions,
-        'Cumulative_Predicted_mL': cumulative_predictions
+        'Cumulative_Predicted_mL': cumulative_predictions,
+        'Substrate_Amount_g': substrate_amount
     })
     
     csv_data = export_data.to_csv(index=False)
@@ -411,7 +441,7 @@ def main():
     
     # Model information
     st.sidebar.header("ℹ️ About")
-    st.sidebar.markdown("**Version:** 1.0 (Minimal)")
+    st.sidebar.markdown("**Version:** 1.1 (With Substrate Input)")
     st.sidebar.markdown("**Dependencies:** None")
     st.sidebar.markdown("**Compatibility:** All platforms")
 
