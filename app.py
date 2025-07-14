@@ -13,7 +13,7 @@ st.set_page_config(
 # ---- 1. Load Data ----
 @st.cache_data
 def load_data():
-    # Experimental data for 30g substrate producing 12L in 30 days
+    # Experimental data for 30g substrate producing 12,000mL (12L) in 25 days
     data = pd.DataFrame({
         'Day': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
                 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
@@ -66,6 +66,10 @@ def fit_prediction_models(data):
     active_prod = daily_prod[:25]
     active_cumulative = cumulative[:25]
     
+    # Calculate scaling factor to match experimental total of 12,000mL
+    experimental_total = 12000  # 12L
+    model_total = sum(active_prod)  # Sum of your experimental data points
+    
     try:
         daily_coeffs = polynomial_regression(active_days, active_prod, degree=2)
         cumulative_coeffs = polynomial_regression(active_days, active_cumulative, degree=2)
@@ -80,7 +84,7 @@ def fit_prediction_models(data):
         'actual_cumulative': cumulative,
         'days': days,
         'base_substrate': 30,  # 30g substrate in base data
-        'total_production': sum(active_prod)  # Total from days 1-25
+        'scaling_factor': experimental_total / model_total  # To match 12L total
     }
 
 def predict_daily_production(day, models, data, substrate_amount):
@@ -106,10 +110,13 @@ def predict_daily_production(day, models, data, substrate_amount):
     else:
         pattern_pred = max(100, 3400 - 250 * (day - 15))  # Decline phase
     
-    # Average the predictions and scale by substrate
+    # Average the predictions
     final_pred = (poly_pred + interp_pred + pattern_pred) / 3
+    
+    # Apply both scaling factor (to match 12L) and substrate scaling
+    scaled_pred = final_pred * models['scaling_factor']
     substrate_factor = substrate_amount / models['base_substrate']
-    return max(0, final_pred * substrate_factor)
+    return max(0, scaled_pred * substrate_factor)
 
 def predict_cumulative_production(day, models, data, substrate_amount):
     """Predict cumulative production scaled by substrate amount"""
@@ -142,7 +149,7 @@ def main():
         max_value=10000.0,
         value=30.0,
         step=1.0,
-        help="Base data used 30g substrate producing 12L in 30 days"
+        help="Base data used 30g substrate producing 12L in 25 days"
     )
     
     # Display raw data
@@ -174,7 +181,7 @@ def main():
         with col2:
             if day <= 25:
                 actual = data[data['Day'] == day]['mL_Produced'].iloc[0]
-                scaled = actual * (substrate_amount / 30)
+                scaled = actual * (substrate_amount / 30) * models['scaling_factor']
                 st.metric("Scaled Experimental", 
                          f"{scaled:.0f} mL",
                          f"{scaled/1000:.2f} L")
@@ -202,7 +209,7 @@ def main():
         with col2:
             if day <= 25:
                 actual = sum(data[data['Day'] <= day]['mL_Produced'])
-                scaled = actual * (substrate_amount / 30)
+                scaled = actual * (substrate_amount / 30) * models['scaling_factor']
                 st.metric("Scaled Experimental",
                          f"{scaled/1000:.2f} L",
                          f"{scaled:.0f} mL")
