@@ -1,209 +1,127 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import math
 
 # Configure the page
 st.set_page_config(
-    page_title="Precision Biogas Predictor",
-    page_icon="🌱",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    page_title="Dynamic Biogas Predictor",
+    page_icon="🔬",
+    layout="wide"
 )
 
-# Constants
-BASE_SUBSTRATE = 30  # grams
-BASE_TOTAL_PRODUCTION = 12000  # mL (12L)
-
-# ---- 1. Load and Process Base Data ----
+# ---- 1. Load Base Data ----
 @st.cache_data
-def load_base_data():
-    """Load and process the base production data (30g substrate)"""
-    # Daily production percentages based on your 12L total
-    daily_percent = [3.3,5.0,6.7,8.8,10.8,12.9,15.0,17.1,19.2,21.3,
-                    30.0,30.8,31.7,31.3,28.3,25.4,22.5,19.6,16.7,
-                    13.8,10.8,7.9,5.8,3.3,0.8]+[0]*5
-    
-    # Calculate mL produced each day to match exact 12L total
-    daily_prod = [round(BASE_TOTAL_PRODUCTION*p/100) for p in daily_percent]
-    
-    # Adjust last production day to ensure exact 12L total
-    daily_prod[24] = BASE_TOTAL_PRODUCTION - sum(daily_prod[:24])
-    
-    data = {
-        'Day': list(range(1, 31)),
-        'mL_Produced': daily_prod,
-        'Percent': daily_percent
-    }
-    df = pd.DataFrame(data)
-    df['Cumulative_mL'] = df['mL_Produced'].cumsum()
-    return df
+def load_data():
+    # Base data for 30g substrate
+    return pd.DataFrame({
+        'Day': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
+                16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
+        'mL_Produced': [400, 600, 800, 1050, 1300, 1550, 1800, 2050, 2300, 2550, 
+                        3600, 3700, 3800, 3750, 3400, 3050, 2700, 2350, 2000, 
+                        1650, 1300, 950, 700, 400, 100, 0, 0, 0, 0, 0],
+        'Percent': [3.3, 5.0, 6.7, 8.8, 10.8, 12.9, 15.0, 17.1, 19.2, 21.3,
+                    30.0, 30.8, 31.7, 31.3, 28.3, 25.4, 22.5, 19.6, 16.7,
+                    13.8, 10.8, 7.9, 5.8, 3.3, 0.8, 0, 0, 0, 0, 0]
+    })
 
-# ---- 2. Production Calculation Functions ----
-def calculate_daily_production(substrate_schedule, base_data):
-    """
-    Calculate daily production based on varying substrate amounts
-    Args:
-        substrate_schedule: dict {day: amount_in_grams}
-        base_data: DataFrame with base production values
-    Returns:
-        DataFrame with daily and cumulative production
-    """
-    results = []
+# ---- 2. Mathematical Functions ----
+def linear_interpolation(x, x_data, y_data):
+    for i in range(len(x_data) - 1):
+        if x_data[i] <= x <= x_data[i + 1]:
+            slope = (y_data[i + 1] - y_data[i]) / (x_data[i + 1] - x_data[i])
+            return y_data[i] + slope * (x - x_data[i])
+    return y_data[-1] if x >= x_data[-1] else y_data[0]
+
+# ---- 3. Dynamic Prediction Functions ----
+def calculate_dynamic_production(substrate_inputs, base_data):
+    """Calculate production with varying substrate amounts"""
+    daily_prod = []
     cumulative = 0
-    last_amount = BASE_SUBSTRATE  # Default base amount
+    
+    # Create substrate schedule (day: amount)
+    substrate_schedule = {int(day): amount for day, amount in substrate_inputs.items()}
     
     for day in range(1, 31):
-        # Get substrate amount for this day
-        current_amount = substrate_schedule.get(day, last_amount)
-        last_amount = current_amount
+        # Get substrate amount for this day (default to last specified amount)
+        substrate = substrate_schedule.get(day, substrate_schedule.get(max(k for k in substrate_schedule.keys() if k <= day), 30))
         
-        # Get base production and scale by substrate amount
-        base_prod = base_data.at[day-1, 'mL_Produced']
-        scaled_prod = base_prod * (current_amount / BASE_SUBSTRATE)
+        # Get base production for this day (from 30g data)
+        if day <= 25:
+            base_prod = base_data[base_data['Day'] == day]['mL_Produced'].values[0]
+        else:
+            base_prod = 0
         
+        # Scale by substrate amount
+        scaled_prod = base_prod * (substrate / 30)
+        daily_prod.append(scaled_prod)
         cumulative += scaled_prod
-        results.append({
-            'Day': day,
-            'Substrate (g)': current_amount,
-            'Daily Production (mL)': scaled_prod,
-            'Cumulative Production (mL)': cumulative,
-            'Status': 'Actual' if day <= 25 else 'Estimated'
-        })
     
-    return pd.DataFrame(results)
+    return daily_prod, cumulative
 
-# ---- 3. Main App ----
+# ---- 4. Main App ----
 def main():
-    # App Header
-    st.title('🌿 Precision Biogas Predictor')
-    st.markdown(f"""
-    **Accurate biogas prediction** with variable substrate inputs.  
-    *Base model: {BASE_SUBSTRATE}g substrate produces exactly {BASE_TOTAL_PRODUCTION/1000}L in 25 days*
-    """)
+    st.title('🌱 Dynamic Biogas Production Predictor')
+    st.markdown("Predict production with varying substrate amounts over time")
     st.markdown("---")
     
-    # Load base data
-    base_data = load_base_data()
+    base_data = load_data()
     
-    # ---- Sidebar Controls ----
-    with st.sidebar:
-        st.header("⚙️ Control Panel")
-        
-        # Date selection
-        start_date = st.date_input("Start Date", datetime.today())
-        
-        # Substrate input
-        st.subheader("Substrate Schedule")
-        num_inputs = st.number_input(
-            "Number of substrate inputs", 
-            min_value=1, 
-            max_value=10, 
-            value=3,
-            key='num_inputs'
-        )
-        
-        substrate_schedule = {}
-        for i in range(num_inputs):
-            cols = st.columns(2)
-            with cols[0]:
-                day = st.number_input(
-                    f"Input Day {i+1}", 
-                    min_value=1, 
-                    max_value=30, 
-                    value=1,  # Default to day 1, let user choose
-                    key=f"day_{i}"
-                )
-            with cols[1]:
-                amount = st.number_input(
-                    f"Amount (g) {i+1}", 
-                    min_value=1, 
-                    max_value=1000, 
-                    value=30,  # Default to 30g
-                    key=f"amount_{i}"
-                )
-            if amount > 0:  # Only add if amount is positive
-                substrate_schedule[day] = amount
-        
-        # Set default substrate if no inputs
-        if not substrate_schedule:
-            substrate_schedule[1] = BASE_SUBSTRATE
-        
-        # Prediction day
-        st.subheader("Prediction Settings")
-        prediction_day = st.number_input(
-            "Day to predict", 
-            min_value=1, 
-            max_value=30, 
-            value=25,
-            key='pred_day'
-        )
+    # ---- Substrate Input Section ----
+    st.sidebar.header("Substrate Schedule")
+    st.sidebar.markdown("Enter substrate amounts (grams) for specific days:")
     
-    # ---- Calculate Production ----
-    try:
-        production_df = calculate_daily_production(substrate_schedule, base_data)
-        
-        # Get prediction row safely
-        pred_row = production_df.iloc[prediction_day-1] if prediction_day <= len(production_df) else production_df.iloc[-1]
-        
-        # ---- Display Results ----
-        st.header("📊 Production Results")
-        
-        # Key Metrics
-        cols = st.columns(3)
+    substrate_inputs = {}
+    cols = st.sidebar.columns(2)
+    for i in range(5):  # Allow 5 input pairs
         with cols[0]:
-            st.metric(f"Day {prediction_day} Substrate", f"{pred_row['Substrate (g)']}g")
+            day = st.number_input(f"Day {i+1}", min_value=1, max_value=30, value=(i+1)*5 if (i+1)*5 <= 25 else 25, key=f"day_{i}")
         with cols[1]:
-            st.metric(
-                f"Day {prediction_day} Production", 
-                f"{pred_row['Daily Production (mL)']/1000:.2f}L",
-                f"{pred_row['Daily Production (mL)']:.0f}mL"
-            )
-        with cols[2]:
-            st.metric(
-                f"Total to Day {prediction_day}", 
-                f"{pred_row['Cumulative Production (mL)']/1000:.2f}L",
-                f"{pred_row['Cumulative Production (mL)']:.0f}mL"
-            )
+            amount = st.number_input(f"Amount (g) {i+1}", min_value=1, max_value=1000, value=30*(i+1), key=f"amount_{i}")
+        substrate_inputs[day] = amount
+    
+    # Remove zero/empty inputs
+    substrate_inputs = {k: v for k, v in substrate_inputs.items() if v > 0}
+    
+    # ---- Prediction Section ----
+    st.header("Production Prediction")
+    prediction_day = st.number_input("Enter day to predict production", min_value=1, max_value=30, value=27)
+    
+    if st.button("Calculate Production"):
+        daily_prod, cumulative = calculate_dynamic_production(substrate_inputs, base_data)
         
-        # Verify total production matches exactly 12L for 30g substrate
-        if all(v == BASE_SUBSTRATE for v in substrate_schedule.values()):
-            st.info(f"✅ Base case verified: {BASE_SUBSTRATE}g substrate produces exactly {BASE_TOTAL_PRODUCTION/1000}L")
+        # Display results
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric(f"Day {prediction_day} Production", 
+                     f"{daily_prod[prediction_day-1]:.0f} mL",
+                     f"{daily_prod[prediction_day-1]/1000:.2f} L")
+        with col2:
+            st.metric(f"Cumulative to Day {prediction_day}",
+                     f"{sum(daily_prod[:prediction_day]):.0f} mL",
+                     f"{sum(daily_prod[:prediction_day])/1000:.2f} L")
         
-        # Date Timeline
-        st.subheader("📅 Production Timeline")
-        timeline_df = production_df.copy()
-        timeline_df['Date'] = [start_date + timedelta(days=int(x)-1) for x in timeline_df['Day']]
+        # Create production dataframe
+        prod_df = pd.DataFrame({
+            'Day': range(1, 31),
+            'Substrate (g)': [substrate_inputs.get(day, substrate_inputs.get(max(k for k in substrate_inputs.keys() if k <= day), 30)) 
+                             for day in range(1, 31)],
+            'Daily Production (mL)': daily_prod,
+            'Cumulative (mL)': [sum(daily_prod[:i]) for i in range(1, 31)]
+        })
         
-        # Display dataframe with formatting
-        st.dataframe(
-            timeline_df[['Date', 'Substrate (g)', 'Daily Production (mL)', 
-                       'Cumulative Production (mL)', 'Status']].set_index('Date'),
-            use_container_width=True
-        )
+        # Show production table
+        with st.expander("View Full Production Schedule"):
+            st.dataframe(prod_df)
         
-        # Interactive Charts
-        st.subheader("📈 Production Charts")
+        # Show charts
+        st.subheader("Production Charts")
         
-        tab1, tab2 = st.tabs(["Daily Production", "Cumulative Production"])
-        with tab1:
-            st.area_chart(production_df, x='Day', y='Daily Production (mL)')
-        with tab2:
-            st.line_chart(production_df, x='Day', y='Cumulative Production (mL)')
+        # Daily Production Chart
+        st.line_chart(prod_df.set_index('Day')[['Daily Production (mL)']])
         
-        # Export Data
-        st.markdown("---")
-        csv = production_df.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Production Data (CSV)",
-            data=csv,
-            file_name="biogas_production.csv",
-            mime="text/csv"
-        )
-        
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
-        st.info("Please check your inputs and try again.")
+        # Cumulative Production Chart
+        st.line_chart(prod_df.set_index('Day')[['Cumulative (mL)']])
 
 if __name__ == "__main__":
     main()
