@@ -13,7 +13,7 @@ st.set_page_config(
 # ---- 1. Load Data ----
 @st.cache_data
 def load_data():
-    # Updated data based on 30g substrate producing 12L in 30 days
+    # Experimental data for 30g substrate producing 12L in 30 days
     data = pd.DataFrame({
         'Day': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
                 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
@@ -41,7 +41,7 @@ def linear_interpolation(x, x_data, y_data):
     return y_data[-1]
 
 def polynomial_regression(x_data, y_data, degree=2):
-    """Simple polynomial regression using numpy"""
+    """Polynomial regression using numpy"""
     coeffs = np.polyfit(x_data, y_data, degree)
     return coeffs[::-1]  # Return in ascending order of powers
 
@@ -61,13 +61,17 @@ def fit_prediction_models(data):
         running_sum += val
         cumulative.append(running_sum)
     
-    # Fit polynomial models
+    # Only fit models to days 1-25 (active production period)
+    active_days = days[:25]
+    active_prod = daily_prod[:25]
+    active_cumulative = cumulative[:25]
+    
     try:
-        daily_coeffs = polynomial_regression(days, daily_prod, degree=2)
-        cumulative_coeffs = polynomial_regression(days, cumulative, degree=2)
+        daily_coeffs = polynomial_regression(active_days, active_prod, degree=2)
+        cumulative_coeffs = polynomial_regression(active_days, active_cumulative, degree=2)
     except:
-        daily_coeffs = [sum(daily_prod) / len(daily_prod), 0]
-        cumulative_coeffs = [0, sum(daily_prod) / len(daily_prod)]
+        daily_coeffs = [sum(active_prod) / len(active_prod), 0]
+        cumulative_coeffs = [0, sum(active_prod) / len(active_prod)]
     
     return {
         'daily_coeffs': daily_coeffs,
@@ -75,21 +79,26 @@ def fit_prediction_models(data):
         'actual_daily': daily_prod,
         'actual_cumulative': cumulative,
         'days': days,
-        'base_substrate': 30  # 30g substrate in our base data
+        'base_substrate': 30,  # 30g substrate in base data
+        'total_production': sum(active_prod)  # Total from days 1-25
     }
 
 def predict_daily_production(day, models, data, substrate_amount):
     """Predict daily production scaled by substrate amount"""
+    # No production after day 25
+    if day > 25:
+        return 0
+    
     # Get base prediction
     poly_pred = evaluate_polynomial(day, models['daily_coeffs'])
     
     # Linear interpolation for days within data range
     if 1 <= day <= 25:
-        interp_pred = linear_interpolation(day, models['days'], models['actual_daily'])
+        interp_pred = linear_interpolation(day, models['days'][:25], models['actual_daily'][:25])
     else:
         interp_pred = poly_pred
     
-    # Pattern recognition
+    # Pattern recognition based on experimental data
     if day <= 10:
         pattern_pred = 200 * day  # Growth phase
     elif day <= 15:
@@ -104,10 +113,16 @@ def predict_daily_production(day, models, data, substrate_amount):
 
 def predict_cumulative_production(day, models, data, substrate_amount):
     """Predict cumulative production scaled by substrate amount"""
-    daily_sum = 0
-    for d in range(1, int(day) + 1):
-        daily_sum += predict_daily_production(d, models, data, substrate_amount)
-    return daily_sum
+    if day <= 25:
+        # Calculate normally for days 1-25
+        daily_sum = 0
+        for d in range(1, int(day) + 1):
+            daily_sum += predict_daily_production(d, models, data, substrate_amount)
+        return daily_sum
+    else:
+        # Return day 25 cumulative value for days 26-30 (no additional production)
+        day25_cumulative = predict_cumulative_production(25, models, data, substrate_amount)
+        return day25_cumulative
 
 # ---- 4. Main App ----
 def main():
@@ -115,6 +130,7 @@ def main():
     st.markdown("*Predict biogas production based on substrate amount*")
     st.markdown("---")
     
+    # Load data and fit models
     data = load_data()
     models = fit_prediction_models(data)
     
@@ -141,7 +157,7 @@ def main():
         with col3:
             st.metric("Average Daily", f"{sum(data['mL_Produced'])/len(data):.0f} mL")
     
-    # Prediction tabs
+    # Main prediction tabs
     tab1, tab2 = st.tabs(["📈 Daily Prediction", "📊 Cumulative Prediction"])
     
     with tab1:
