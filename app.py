@@ -5,16 +5,16 @@ import math
 
 # Configure the page
 st.set_page_config(
-    page_title="Dynamic Biogas Predictor",
+    page_title="Biogas Production Predictor",
     page_icon="🔬",
     layout="wide"
 )
 
-# ---- 1. Load Base Data ----
+# ---- 1. Load Data ----
 @st.cache_data
 def load_data():
-    # Base data for 30g substrate
-    return pd.DataFrame({
+    # Experimental data for 30g substrate producing 12,000mL (12L) in 25 days
+    data = pd.DataFrame({
         'Day': [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 
                 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30],
         'mL_Produced': [400, 600, 800, 1050, 1300, 1550, 1800, 2050, 2300, 2550, 
@@ -24,104 +24,204 @@ def load_data():
                     30.0, 30.8, 31.7, 31.3, 28.3, 25.4, 22.5, 19.6, 16.7,
                     13.8, 10.8, 7.9, 5.8, 3.3, 0.8, 0, 0, 0, 0, 0]
     })
+    return data
 
 # ---- 2. Mathematical Functions ----
 def linear_interpolation(x, x_data, y_data):
+    """Simple linear interpolation between two points"""
+    if x <= x_data[0]:
+        return y_data[0]
+    if x >= x_data[-1]:
+        return y_data[-1]
+    
     for i in range(len(x_data) - 1):
         if x_data[i] <= x <= x_data[i + 1]:
             slope = (y_data[i + 1] - y_data[i]) / (x_data[i + 1] - x_data[i])
             return y_data[i] + slope * (x - x_data[i])
-    return y_data[-1] if x >= x_data[-1] else y_data[0]
+    return y_data[-1]
 
-# ---- 3. Dynamic Prediction Functions ----
-def calculate_dynamic_production(substrate_inputs, base_data):
-    """Calculate production with varying substrate amounts"""
-    daily_prod = []
-    cumulative = 0
+def polynomial_regression(x_data, y_data, degree=2):
+    """Polynomial regression using numpy"""
+    coeffs = np.polyfit(x_data, y_data, degree)
+    return coeffs[::-1]  # Return in ascending order of powers
+
+def evaluate_polynomial(x, coeffs):
+    """Evaluate polynomial at point x"""
+    return sum(coeff * (x ** i) for i, coeff in enumerate(coeffs))
+
+# ---- 3. Prediction Functions ----
+@st.cache_data
+def fit_prediction_models(data):
+    """Fit prediction models to the data"""
+    days = data['Day'].tolist()
+    daily_prod = data['mL_Produced'].tolist()
+    cumulative = []
+    running_sum = 0
+    for val in daily_prod:
+        running_sum += val
+        cumulative.append(running_sum)
     
-    # Create substrate schedule (day: amount)
-    substrate_schedule = {int(day): amount for day, amount in substrate_inputs.items()}
+    # Only fit models to days 1-25 (active production period)
+    active_days = days[:25]
+    active_prod = daily_prod[:25]
+    active_cumulative = cumulative[:25]
     
-    for day in range(1, 31):
-        # Get substrate amount for this day (default to last specified amount)
-        substrate = substrate_schedule.get(day, substrate_schedule.get(max(k for k in substrate_schedule.keys() if k <= day), 30))
-        
-        # Get base production for this day (from 30g data)
-        if day <= 25:
-            base_prod = base_data[base_data['Day'] == day]['mL_Produced'].values[0]
-        else:
-            base_prod = 0
-        
-        # Scale by substrate amount
-        scaled_prod = base_prod * (substrate / 30)
-        daily_prod.append(scaled_prod)
-        cumulative += scaled_prod
+    # Calculate scaling factor to match experimental total of 12,000mL
+    experimental_total = 12000  # 12L
+    model_total = sum(active_prod)  # Sum of your experimental data points
     
-    return daily_prod, cumulative
+    try:
+        daily_coeffs = polynomial_regression(active_days, active_prod, degree=2)
+        cumulative_coeffs = polynomial_regression(active_days, active_cumulative, degree=2)
+    except:
+        daily_coeffs = [sum(active_prod) / len(active_prod), 0]
+        cumulative_coeffs = [0, sum(active_prod) / len(active_prod)]
+    
+    return {
+        'daily_coeffs': daily_coeffs,
+        'cumulative_coeffs': cumulative_coeffs,
+        'actual_daily': daily_prod,
+        'actual_cumulative': cumulative,
+        'days': days,
+        'base_substrate': 30,  # 30g substrate in base data
+        'scaling_factor': experimental_total / model_total  # To match 12L total
+    }
+
+def predict_daily_production(day, models, data, substrate_amount):
+    """Predict daily production scaled by substrate amount"""
+    # No production after day 25
+    if day > 25:
+        return 0
+    
+    # Get base prediction
+    poly_pred = evaluate_polynomial(day, models['daily_coeffs'])
+    
+    # Linear interpolation for days within data range
+    if 1 <= day <= 25:
+        interp_pred = linear_interpolation(day, models['days'][:25], models['actual_daily'][:25])
+    else:
+        interp_pred = poly_pred
+    
+    # Pattern recognition based on experimental data
+    if day <= 10:
+        pattern_pred = 200 * day  # Growth phase
+    elif day <= 15:
+        pattern_pred = 3800 - 100 * (day - 10)  # Peak phase
+    else:
+        pattern_pred = max(100, 3400 - 250 * (day - 15))  # Decline phase
+    
+    # Average the predictions
+    final_pred = (poly_pred + interp_pred + pattern_pred) / 3
+    
+    # Apply both scaling factor (to match 12L) and substrate scaling
+    scaled_pred = final_pred * models['scaling_factor']
+    substrate_factor = substrate_amount / models['base_substrate']
+    return max(0, scaled_pred * substrate_factor)
+
+def predict_cumulative_production(day, models, data, substrate_amount):
+    """Predict cumulative production scaled by substrate amount"""
+    if day <= 25:
+        # Calculate normally for days 1-25
+        daily_sum = 0
+        for d in range(1, int(day) + 1):
+            daily_sum += predict_daily_production(d, models, data, substrate_amount)
+        return daily_sum
+    else:
+        # Return day 25 cumulative value for days 26-30 (no additional production)
+        day25_cumulative = predict_cumulative_production(25, models, data, substrate_amount)
+        return day25_cumulative
 
 # ---- 4. Main App ----
 def main():
-    st.title('🌱 Dynamic Biogas Production Predictor')
-    st.markdown("Predict production with varying substrate amounts over time")
+    st.title('🔬 Biogas Production Predictor')
+    st.markdown("*Predict biogas production based on substrate amount*")
     st.markdown("---")
     
-    base_data = load_data()
+    # Load data and fit models
+    data = load_data()
+    models = fit_prediction_models(data)
     
-    # ---- Substrate Input Section ----
-    st.sidebar.header("Substrate Schedule")
-    st.sidebar.markdown("Enter substrate amounts (grams) for specific days:")
+    # Sidebar - User Inputs
+    st.sidebar.header("🌱 Substrate Input")
+    substrate_amount = st.sidebar.number_input(
+        "Enter substrate amount (grams):",
+        min_value=1.0,
+        max_value=10000.0,
+        value=30.0,
+        step=1.0,
+        help="Base data used 30g substrate producing 12L in 25 days"
+    )
     
-    substrate_inputs = {}
-    cols = st.sidebar.columns(2)
-    for i in range(5):  # Allow 5 input pairs
-        with cols[0]:
-            day = st.number_input(f"Day {i+1}", min_value=1, max_value=30, value=(i+1)*5 if (i+1)*5 <= 25 else 25, key=f"day_{i}")
-        with cols[1]:
-            amount = st.number_input(f"Amount (g) {i+1}", min_value=1, max_value=1000, value=30*(i+1), key=f"amount_{i}")
-        substrate_inputs[day] = amount
-    
-    # Remove zero/empty inputs
-    substrate_inputs = {k: v for k, v in substrate_inputs.items() if v > 0}
-    
-    # ---- Prediction Section ----
-    st.header("Production Prediction")
-    prediction_day = st.number_input("Enter day to predict production", min_value=1, max_value=30, value=27)
-    
-    if st.button("Calculate Production"):
-        daily_prod, cumulative = calculate_dynamic_production(substrate_inputs, base_data)
+    # Display raw data
+    with st.expander("📋 View Experimental Data (30g substrate)"):
+        st.dataframe(data)
         
-        # Display results
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Days", len(data))
+        with col2:
+            st.metric("Total Production", f"{sum(data['mL_Produced'])/1000:.2f} L")
+        with col3:
+            st.metric("Average Daily", f"{sum(data['mL_Produced'])/len(data):.0f} mL")
+    
+    # Main prediction tabs
+    tab1, tab2 = st.tabs(["📈 Daily Prediction", "📊 Cumulative Prediction"])
+    
+    with tab1:
+        st.subheader("Daily Biogas Production Prediction")
+        day = st.slider("Select day for prediction", 1, 30, 11, key="daily")
+        
+        daily_pred = predict_daily_production(day, models, data, substrate_amount)
+        
         col1, col2 = st.columns(2)
         with col1:
-            st.metric(f"Day {prediction_day} Production", 
-                     f"{daily_prod[prediction_day-1]:.0f} mL",
-                     f"{daily_prod[prediction_day-1]/1000:.2f} L")
+            st.metric("Predicted Daily", 
+                     f"{daily_pred:.0f} mL",
+                     f"{daily_pred/1000:.2f} L")
         with col2:
-            st.metric(f"Cumulative to Day {prediction_day}",
-                     f"{sum(daily_prod[:prediction_day]):.0f} mL",
-                     f"{sum(daily_prod[:prediction_day])/1000:.2f} L")
+            if day <= 25:
+                actual = data[data['Day'] == day]['mL_Produced'].iloc[0]
+                scaled = actual * (substrate_amount / 30) * models['scaling_factor']
+                st.metric("Scaled Experimental", 
+                         f"{scaled:.0f} mL",
+                         f"{scaled/1000:.2f} L")
         
-        # Create production dataframe
-        prod_df = pd.DataFrame({
-            'Day': range(1, 31),
-            'Substrate (g)': [substrate_inputs.get(day, substrate_inputs.get(max(k for k in substrate_inputs.keys() if k <= day), 30)) 
-                             for day in range(1, 31)],
-            'Daily Production (mL)': daily_prod,
-            'Cumulative (mL)': [sum(daily_prod[:i]) for i in range(1, 31)]
+        # Daily chart
+        days = list(range(1, 31))
+        preds = [predict_daily_production(d, models, data, substrate_amount) for d in days]
+        chart_data = pd.DataFrame({
+            'Day': days,
+            'Predicted (L)': [x/1000 for x in preds]
         })
+        st.line_chart(chart_data.set_index('Day'))
+    
+    with tab2:
+        st.subheader("Cumulative Biogas Production Prediction")
+        day = st.slider("Select day for prediction", 1, 30, 15, key="cumulative")
         
-        # Show production table
-        with st.expander("View Full Production Schedule"):
-            st.dataframe(prod_df)
+        cum_pred = predict_cumulative_production(day, models, data, substrate_amount)
         
-        # Show charts
-        st.subheader("Production Charts")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("Predicted Cumulative",
+                     f"{cum_pred/1000:.2f} L",
+                     f"{cum_pred:.0f} mL")
+        with col2:
+            if day <= 25:
+                actual = sum(data[data['Day'] <= day]['mL_Produced'])
+                scaled = actual * (substrate_amount / 30) * models['scaling_factor']
+                st.metric("Scaled Experimental",
+                         f"{scaled/1000:.2f} L",
+                         f"{scaled:.0f} mL")
         
-        # Daily Production Chart
-        st.line_chart(prod_df.set_index('Day')[['Daily Production (mL)']])
-        
-        # Cumulative Production Chart
-        st.line_chart(prod_df.set_index('Day')[['Cumulative (mL)']])
+        # Cumulative chart
+        days = list(range(1, 31))
+        cum_preds = [predict_cumulative_production(d, models, data, substrate_amount) for d in days]
+        cum_data = pd.DataFrame({
+            'Day': days,
+            'Cumulative (L)': [x/1000 for x in cum_preds]
+        })
+        st.line_chart(cum_data.set_index('Day'))
 
 if __name__ == "__main__":
     main()
