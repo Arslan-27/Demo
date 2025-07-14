@@ -1,0 +1,8 @@
+matplotlib==3.7.1
+pandas==2.0.3
+numpy==1.24.3
+streamlit==1.25.0
+cycler==0.11.0  # Critical for matplotlib
+fonttools==4.39.3  # Required dependency
+kiwisolver==1.4.4  # Math backend
+pyparsing==3.0.9  # Plotting dependency
