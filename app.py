@@ -1,11 +1,18 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from scipy.optimize import curve_fit
-from scipy import interpolate
 import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
+
+# Try to import scipy, if not available use fallback
+try:
+    from scipy.optimize import curve_fit
+    from scipy import interpolate
+    SCIPY_AVAILABLE = True
+except ImportError:
+    SCIPY_AVAILABLE = False
+    st.warning("⚠️ SciPy not available. Using simplified prediction methods.")
 
 # Configure the page
 st.set_page_config(
@@ -24,50 +31,111 @@ def load_data():
     })
     return data
 
-# ---- 2. Gompertz Model Fitting ----
+# ---- 2. Fallback Interpolation (without scipy) ----
+def linear_interpolation(x, x_data, y_data):
+    """Simple linear interpolation"""
+    if x <= x_data[0]:
+        return y_data[0]
+    if x >= x_data[-1]:
+        return y_data[-1]
+    
+    for i in range(len(x_data) - 1):
+        if x_data[i] <= x <= x_data[i + 1]:
+            # Linear interpolation between two points
+            t = (x - x_data[i]) / (x_data[i + 1] - x_data[i])
+            return y_data[i] + t * (y_data[i + 1] - y_data[i])
+    
+    return y_data[-1]
+
+def polynomial_fit(x_data, y_data, degree=3):
+    """Polynomial fitting using numpy"""
+    coeffs = np.polyfit(x_data, y_data, degree)
+    return coeffs
+
+def predict_polynomial(x, coeffs):
+    """Predict using polynomial coefficients"""
+    return np.polyval(coeffs, x)
+
+# ---- 3. Gompertz Model (with fallback) ----
 def gompertz(t, Y_max, R_max, lag):
     """Gompertz growth model"""
-    return Y_max * np.exp(-np.exp((R_max * np.exp(1) / Y_max) * (lag - t) + 1))
-
-@st.cache_data
-def fit_gompertz_model(data):
-    """Fit Gompertz model to cumulative data"""
-    cumulative = np.cumsum(data['mL_Produced'])
     try:
-        # Fixed the syntax error in curve_fit
-        params, covariance = curve_fit(gompertz, data['Day'], cumulative, 
-                                     p0=[12000, 1000, 10], 
-                                     maxfev=5000,
-                                     bounds=([1000, 100, 0], [50000, 5000, 30]))
-        Y_max, R_max, lag = params
-        
-        # Calculate R-squared
-        y_pred = gompertz(data['Day'], Y_max, R_max, lag)
-        ss_res = np.sum((cumulative - y_pred) ** 2)
-        ss_tot = np.sum((cumulative - np.mean(cumulative)) ** 2)
-        r_squared = 1 - (ss_res / ss_tot)
-        
-        return Y_max, R_max, lag, r_squared
-    except Exception as e:
-        st.warning(f"Model fitting failed: {e}. Using fallback values.")
-        return 12000, 1000, 10, 0.0  # Fallback values
+        return Y_max * np.exp(-np.exp((R_max * np.exp(1) / Y_max) * (lag - t) + 1))
+    except:
+        # Fallback to simpler exponential model
+        return Y_max * (1 - np.exp(-(t - lag) / R_max)) if t > lag else 0
 
+# ---- 4. Model Fitting Functions ----
 @st.cache_data
-def create_interpolation_functions(data):
-    """Create interpolation functions for daily and cumulative data"""
+def fit_models(data):
+    """Fit different models to the data"""
     cumulative = np.cumsum(data['mL_Produced'])
     
+    results = {
+        'gompertz_params': None,
+        'polynomial_coeffs': None,
+        'linear_coeffs': None,
+        'r_squared': 0.0
+    }
+    
+    if SCIPY_AVAILABLE:
+        # Try Gompertz fitting with scipy
+        try:
+            params, _ = curve_fit(gompertz, data['Day'], cumulative, 
+                                p0=[12000, 1000, 10], 
+                                maxfev=5000,
+                                bounds=([1000, 100, 0], [50000, 5000, 30]))
+            results['gompertz_params'] = params
+            
+            # Calculate R-squared
+            y_pred = gompertz(data['Day'], *params)
+            ss_res = np.sum((cumulative - y_pred) ** 2)
+            ss_tot = np.sum((cumulative - np.mean(cumulative)) ** 2)
+            results['r_squared'] = 1 - (ss_res / ss_tot)
+            
+        except Exception as e:
+            st.warning(f"Gompertz fitting failed: {e}")
+    
+    # Fallback polynomial fitting
     try:
-        daily_interp = interpolate.interp1d(data['Day'], data['mL_Produced'], 
-                                          kind='cubic', fill_value='extrapolate')
-        cumulative_interp = interpolate.interp1d(data['Day'], cumulative, 
-                                               kind='cubic', fill_value='extrapolate')
-        return daily_interp, cumulative_interp
+        results['polynomial_coeffs'] = polynomial_fit(data['Day'], cumulative, degree=3)
+        results['linear_coeffs'] = polynomial_fit(data['Day'], data['mL_Produced'], degree=2)
     except Exception as e:
-        st.error(f"Interpolation failed: {e}")
-        return None, None
+        st.error(f"Polynomial fitting failed: {e}")
+    
+    return results
 
-# ---- 3. Main App ----
+# ---- 5. Prediction Functions ----
+def predict_daily(day, data, model_results):
+    """Predict daily production for a given day"""
+    if SCIPY_AVAILABLE and model_results['gompertz_params'] is not None:
+        # Use scipy interpolation
+        try:
+            interp_func = interpolate.interp1d(data['Day'], data['mL_Produced'], 
+                                             kind='cubic', fill_value='extrapolate')
+            return float(interp_func(day))
+        except:
+            pass
+    
+    # Fallback to linear interpolation
+    if model_results['linear_coeffs'] is not None:
+        return predict_polynomial(day, model_results['linear_coeffs'])
+    else:
+        return linear_interpolation(day, data['Day'].values, data['mL_Produced'].values)
+
+def predict_cumulative(day, data, model_results):
+    """Predict cumulative production for a given day"""
+    if model_results['gompertz_params'] is not None:
+        Y_max, R_max, lag = model_results['gompertz_params']
+        return gompertz(day, Y_max, R_max, lag)
+    elif model_results['polynomial_coeffs'] is not None:
+        return predict_polynomial(day, model_results['polynomial_coeffs'])
+    else:
+        # Simple linear extrapolation
+        cumulative = np.cumsum(data['mL_Produced'])
+        return linear_interpolation(day, data['Day'].values, cumulative.values)
+
+# ---- 6. Main App ----
 def main():
     # Header
     st.title('🔬 Biogas Production Predictor')
@@ -75,27 +143,28 @@ def main():
     
     # Load data and fit models
     data = load_data()
-    Y_max, R_max, lag, r_squared = fit_gompertz_model(data)
-    daily_interp, cumulative_interp = create_interpolation_functions(data)
-    
-    if daily_interp is None or cumulative_interp is None:
-        st.error("Failed to create interpolation functions. Please check your data.")
-        return
+    model_results = fit_models(data)
     
     # Sidebar for model parameters
-    st.sidebar.header("📊 Model Parameters")
-    st.sidebar.markdown("**Gompertz Model Fit:**")
-    st.sidebar.metric("Y_max (Total Potential)", f"{Y_max:.0f} mL")
-    st.sidebar.metric("R_max (Max Rate)", f"{R_max:.0f} mL/day")
-    st.sidebar.metric("Lag Phase", f"{lag:.1f} days")
-    st.sidebar.metric("R-squared", f"{r_squared:.3f}")
+    st.sidebar.header("📊 Model Information")
+    
+    if model_results['gompertz_params'] is not None:
+        Y_max, R_max, lag = model_results['gompertz_params']
+        st.sidebar.markdown("**Gompertz Model Fit:**")
+        st.sidebar.metric("Y_max (Total Potential)", f"{Y_max:.0f} mL")
+        st.sidebar.metric("R_max (Max Rate)", f"{R_max:.0f} mL/day")
+        st.sidebar.metric("Lag Phase", f"{lag:.1f} days")
+        st.sidebar.metric("R-squared", f"{model_results['r_squared']:.3f}")
+    else:
+        st.sidebar.markdown("**Using Polynomial Model:**")
+        st.sidebar.info("Advanced Gompertz model not available. Using polynomial approximation.")
     
     # Display raw data
     with st.expander("📋 View Raw Data"):
         st.dataframe(data, use_container_width=True)
     
     # Main tabs
-    tab1, tab2, tab3 = st.tabs(["📈 Daily Prediction", "📊 Cumulative Prediction", "📉 Model Comparison"])
+    tab1, tab2, tab3 = st.tabs(["📈 Daily Prediction", "📊 Cumulative Prediction", "📉 Data Visualization"])
     
     with tab1:
         st.subheader("Daily Biogas Production Prediction")
@@ -105,31 +174,31 @@ def main():
         col1, col2 = st.columns(2)
         
         with col1:
-            daily_pred = daily_interp(day)
-            st.metric("Daily Production (Interpolation)", 
-                     f"{daily_pred:.1f} mL",
-                     delta=f"{daily_pred - daily_interp(day-1):.1f} mL" if day > 1 else None)
+            daily_pred = predict_daily(day, data, model_results)
+            st.metric("Predicted Daily Production", f"{daily_pred:.1f} mL")
         
         with col2:
             if day > 1:
-                gompertz_daily = gompertz(day, Y_max, R_max, lag) - gompertz(day-1, Y_max, R_max, lag)
+                prev_cumulative = predict_cumulative(day-1, data, model_results)
+                curr_cumulative = predict_cumulative(day, data, model_results)
+                daily_from_cumulative = curr_cumulative - prev_cumulative
             else:
-                gompertz_daily = gompertz(day, Y_max, R_max, lag)
+                daily_from_cumulative = predict_cumulative(day, data, model_results)
             
-            st.metric("Daily Production (Gompertz Model)", 
-                     f"{gompertz_daily:.1f} mL")
+            st.metric("Daily from Cumulative Model", f"{daily_from_cumulative:.1f} mL")
         
         # Plot daily production
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.scatter(data['Day'], data['mL_Produced'], color='blue', s=50, label='Actual Data', zorder=5)
         
-        pred_days = np.linspace(1, 30, 100)
-        daily_pred_vals = [daily_interp(x) for x in pred_days]
-        ax.plot(pred_days, daily_pred_vals, 'r-', linewidth=2, label='Interpolation', alpha=0.8)
+        # Prediction line
+        pred_days = np.arange(1, 31)
+        daily_predictions = [predict_daily(d, data, model_results) for d in pred_days]
+        ax.plot(pred_days, daily_predictions, 'r-', linewidth=2, label='Prediction', alpha=0.8)
         
         # Highlight selected day
         ax.axvline(x=day, color='green', linestyle='--', alpha=0.7, label=f'Selected Day {day}')
-        ax.scatter([day], [daily_interp(day)], color='green', s=100, zorder=10)
+        ax.scatter([day], [daily_pred], color='green', s=100, zorder=10)
         
         ax.set_xlabel('Day', fontsize=12)
         ax.set_ylabel('Daily Biogas Production (mL)', fontsize=12)
@@ -144,30 +213,22 @@ def main():
         
         day = st.slider("Select day for cumulative prediction", 1, 30, 11, key="cumulative_slider")
         
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            cumulative_pred = cumulative_interp(day)
-            st.metric("Cumulative (Interpolation)", 
-                     f"{cumulative_pred:.0f} mL")
-        
-        with col2:
-            gompertz_cumulative = gompertz(day, Y_max, R_max, lag)
-            st.metric("Cumulative (Gompertz Model)", 
-                     f"{gompertz_cumulative:.0f} mL")
+        cumulative_pred = predict_cumulative(day, data, model_results)
+        st.metric("Predicted Cumulative Production", f"{cumulative_pred:.0f} mL")
         
         # Plot cumulative production
         fig, ax = plt.subplots(figsize=(10, 6))
         cumulative_actual = np.cumsum(data['mL_Produced'])
         ax.scatter(data['Day'], cumulative_actual, color='blue', s=50, label='Actual Data', zorder=5)
         
-        pred_days = np.linspace(1, 30, 100)
-        gompertz_vals = [gompertz(x, Y_max, R_max, lag) for x in pred_days]
-        ax.plot(pred_days, gompertz_vals, 'g-', linewidth=2, label='Gompertz Model', alpha=0.8)
+        # Prediction line
+        pred_days = np.arange(1, 31)
+        cumulative_predictions = [predict_cumulative(d, data, model_results) for d in pred_days]
+        ax.plot(pred_days, cumulative_predictions, 'g-', linewidth=2, label='Prediction', alpha=0.8)
         
         # Highlight selected day
         ax.axvline(x=day, color='red', linestyle='--', alpha=0.7, label=f'Selected Day {day}')
-        ax.scatter([day], [gompertz(day, Y_max, R_max, lag)], color='red', s=100, zorder=10)
+        ax.scatter([day], [cumulative_pred], color='red', s=100, zorder=10)
         
         ax.set_xlabel('Day', fontsize=12)
         ax.set_ylabel('Cumulative Biogas Production (mL)', fontsize=12)
@@ -178,38 +239,39 @@ def main():
         st.pyplot(fig)
     
     with tab3:
-        st.subheader("Model Comparison")
+        st.subheader("Data Visualization & Analysis")
         
-        # Compare both models
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
         
-        # Daily comparison
-        pred_days = np.linspace(1, 30, 100)
-        daily_pred_vals = [daily_interp(x) for x in pred_days]
-        daily_gompertz = [gompertz(x, Y_max, R_max, lag) - gompertz(x-1, Y_max, R_max, lag) if x > 1 else gompertz(x, Y_max, R_max, lag) for x in pred_days]
-        
-        ax1.scatter(data['Day'], data['mL_Produced'], color='blue', s=50, label='Actual Data', zorder=5)
-        ax1.plot(pred_days, daily_pred_vals, 'r-', linewidth=2, label='Interpolation', alpha=0.8)
-        ax1.plot(pred_days, daily_gompertz, 'g-', linewidth=2, label='Gompertz (Daily)', alpha=0.8)
+        # Original daily data
+        ax1.bar(data['Day'], data['mL_Produced'], color='skyblue', alpha=0.7)
         ax1.set_xlabel('Day')
         ax1.set_ylabel('Daily Production (mL)')
-        ax1.set_title('Daily Production Comparison')
-        ax1.legend()
+        ax1.set_title('Daily Biogas Production (Actual)')
         ax1.grid(True, alpha=0.3)
         
-        # Cumulative comparison
+        # Cumulative data
         cumulative_actual = np.cumsum(data['mL_Produced'])
-        cumulative_pred_vals = [cumulative_interp(x) for x in pred_days]
-        gompertz_vals = [gompertz(x, Y_max, R_max, lag) for x in pred_days]
-        
-        ax2.scatter(data['Day'], cumulative_actual, color='blue', s=50, label='Actual Data', zorder=5)
-        ax2.plot(pred_days, cumulative_pred_vals, 'r-', linewidth=2, label='Interpolation', alpha=0.8)
-        ax2.plot(pred_days, gompertz_vals, 'g-', linewidth=2, label='Gompertz Model', alpha=0.8)
+        ax2.plot(data['Day'], cumulative_actual, 'bo-', linewidth=2, markersize=6)
         ax2.set_xlabel('Day')
         ax2.set_ylabel('Cumulative Production (mL)')
-        ax2.set_title('Cumulative Production Comparison')
-        ax2.legend()
+        ax2.set_title('Cumulative Biogas Production (Actual)')
         ax2.grid(True, alpha=0.3)
+        
+        # Percentage data
+        ax3.plot(data['Day'], data['Percent'], 'ro-', linewidth=2, markersize=6)
+        ax3.set_xlabel('Day')
+        ax3.set_ylabel('Percentage (%)')
+        ax3.set_title('Biogas Percentage Over Time')
+        ax3.grid(True, alpha=0.3)
+        
+        # Production rate (derivative)
+        production_rate = np.diff(data['mL_Produced'])
+        ax4.plot(data['Day'][1:], production_rate, 'go-', linewidth=2, markersize=6)
+        ax4.set_xlabel('Day')
+        ax4.set_ylabel('Production Rate Change (mL/day)')
+        ax4.set_title('Daily Production Rate Change')
+        ax4.grid(True, alpha=0.3)
         
         plt.tight_layout()
         st.pyplot(fig)
@@ -219,8 +281,8 @@ def main():
     
     # Generate prediction data
     export_days = np.arange(1, 31)
-    daily_predictions = [daily_interp(x) for x in export_days]
-    cumulative_predictions = [gompertz(x, Y_max, R_max, lag) for x in export_days]
+    daily_predictions = [predict_daily(d, data, model_results) for d in export_days]
+    cumulative_predictions = [predict_cumulative(d, data, model_results) for d in export_days]
     
     export_data = pd.DataFrame({
         'Day': export_days,
