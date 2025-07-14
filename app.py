@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 # Configure the page
 st.set_page_config(
-    page_title="Dynamic Biogas Predictor Pro",
+    page_title="Biogas Predictor Pro",
     page_icon="🌱",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -15,15 +15,16 @@ st.set_page_config(
 @st.cache_data
 def load_base_data():
     """Load and process the base production data (30g substrate)"""
-    df = pd.DataFrame({
-        'Day': range(1, 31),
+    data = {
+        'Day': list(range(1, 31)),
         'mL_Produced': [400,600,800,1050,1300,1550,1800,2050,2300,2550,
                         3600,3700,3800,3750,3400,3050,2700,2350,2000,
                         1650,1300,950,700,400,100]+[0]*5,
         'Percent': [3.3,5.0,6.7,8.8,10.8,12.9,15.0,17.1,19.2,21.3,
-                   30.0,30.8,31.7,31.3,28.3,25.4,22.5,19.6,16.7,
-                   13.8,10.8,7.9,5.8,3.3,0.8]+[0]*5
-    })
+                    30.0,30.8,31.7,31.3,28.3,25.4,22.5,19.6,16.7,
+                    13.8,10.8,7.9,5.8,3.3,0.8]+[0]*5
+    }
+    df = pd.DataFrame(data)
     df['Cumulative_mL'] = df['mL_Produced'].cumsum()
     return df
 
@@ -39,7 +40,7 @@ def calculate_daily_production(substrate_schedule, base_data):
     """
     results = []
     cumulative = 0
-    last_amount = 30  # Default if no substrate specified
+    last_amount = 30  # Default base amount
     
     for day in range(1, 31):
         # Get substrate amount for this day
@@ -47,7 +48,7 @@ def calculate_daily_production(substrate_schedule, base_data):
         last_amount = current_amount
         
         # Get base production and scale by substrate amount
-        base_prod = base_data.loc[day-1, 'mL_Produced']
+        base_prod = base_data.at[day-1, 'mL_Produced']
         scaled_prod = base_prod * (current_amount / 30)
         
         cumulative += scaled_prod
@@ -61,27 +62,10 @@ def calculate_daily_production(substrate_schedule, base_data):
     
     return pd.DataFrame(results)
 
-# ---- 3. Visualization Functions ----
-def plot_production_charts(df):
-    """Create interactive production charts"""
-    tab1, tab2, tab3 = st.tabs(["Daily Production", "Cumulative Production", "Full Data"])
-    
-    with tab1:
-        st.area_chart(df, x='Day', y='Daily Production (mL)')
-    
-    with tab2:
-        st.line_chart(df, x='Day', y='Cumulative Production (mL)')
-    
-    with tab3:
-        st.dataframe(df.style.format({
-            'Daily Production (mL)': '{:.0f}',
-            'Cumulative Production (mL)': '{:.0f}'
-        }), use_container_width=True)
-
-# ---- 4. Main App ----
+# ---- 3. Main App ----
 def main():
     # App Header
-    st.title('🌿 Dynamic Biogas Production Predictor Pro')
+    st.title('🌿 Biogas Production Predictor Pro')
     st.markdown("""
     Predict biogas production with **variable substrate inputs** over time.  
     *Base model: 30g substrate produces 12L in 25 days (last 5 days zero production)*
@@ -100,65 +84,105 @@ def main():
         
         # Substrate input
         st.subheader("Substrate Schedule")
-        num_inputs = st.slider("Number of substrate inputs", 1, 10, 3)
+        num_inputs = st.slider("Number of substrate inputs", 1, 10, 3, key='num_inputs')
         
         substrate_schedule = {}
         for i in range(num_inputs):
             cols = st.columns(2)
             with cols[0]:
-                day = st.number_input(f"Day {i+1}", min_value=1, max_value=30, 
-                                     value=(i+1)*7 if (i+1)*7 <=25 else 25, 
-                                     key=f"day_{i}")
+                day = st.number_input(
+                    f"Day {i+1}", 
+                    min_value=1, 
+                    max_value=30, 
+                    value=min((i+1)*7, 25),  # Ensure we don't go beyond day 25
+                    key=f"day_{i}"
+                )
             with cols[1]:
-                amount = st.number_input(f"Amount (g) {i+1}", min_value=1, 
-                                       max_value=1000, value=30*(i+1), 
-                                       key=f"amount_{i}")
-            substrate_schedule[day] = amount
+                amount = st.number_input(
+                    f"Amount (g) {i+1}", 
+                    min_value=1, 
+                    max_value=1000, 
+                    value=30*(i+1), 
+                    key=f"amount_{i}"
+                )
+            if amount > 0:  # Only add if amount is positive
+                substrate_schedule[day] = amount
+        
+        # Set default substrate if no inputs
+        if not substrate_schedule:
+            substrate_schedule[1] = 30  # Default to 30g on day 1
         
         # Prediction day
         st.subheader("Prediction Settings")
-        prediction_day = st.number_input("Day to predict", min_value=1, max_value=30, value=27)
+        prediction_day = st.number_input(
+            "Day to predict", 
+            min_value=1, 
+            max_value=30, 
+            value=25,
+            key='pred_day'
+        )
     
     # ---- Calculate Production ----
-    production_df = calculate_daily_production(substrate_schedule, base_data)
-    
-    # ---- Display Results ----
-    st.header("📊 Production Results")
-    
-    # Key Metrics
-    pred_row = production_df.iloc[prediction_day-1]
-    cols = st.columns(3)
-    with cols[0]:
-        st.metric(f"Day {prediction_day} Substrate", f"{pred_row['Substrate (g)']}g")
-    with cols[1]:
-        st.metric(f"Day {prediction_day} Production", 
+    try:
+        production_df = calculate_daily_production(substrate_schedule, base_data)
+        
+        # Get prediction row safely
+        pred_row = production_df.iloc[prediction_day-1] if prediction_day <= len(production_df) else production_df.iloc[-1]
+        
+        # ---- Display Results ----
+        st.header("📊 Production Results")
+        
+        # Key Metrics
+        cols = st.columns(3)
+        with cols[0]:
+            st.metric(f"Day {prediction_day} Substrate", f"{pred_row['Substrate (g)']}g")
+        with cols[1]:
+            st.metric(
+                f"Day {prediction_day} Production", 
                 f"{pred_row['Daily Production (mL)']/1000:.2f}L",
-                f"{pred_row['Daily Production (mL)']:.0f}mL")
-    with cols[2]:
-        st.metric(f"Total to Day {prediction_day}", 
+                f"{pred_row['Daily Production (mL)']:.0f}mL"
+            )
+        with cols[2]:
+            st.metric(
+                f"Total to Day {prediction_day}", 
                 f"{pred_row['Cumulative Production (mL)']/1000:.2f}L",
-                f"{pred_row['Cumulative Production (mL)']:.0f}mL")
-    
-    # Date Timeline
-    st.markdown("### 📅 Production Timeline")
-    timeline_df = production_df.copy()
-    timeline_df['Date'] = [start_date + timedelta(days=int(x)-1 for x in timeline_df['Day']]
-    st.dataframe(timeline_df[['Date', 'Substrate (g)', 'Daily Production (mL)', 
-                            'Cumulative Production (mL)', 'Status']].set_index('Date'),
-                use_container_width=True)
-    
-    # Interactive Charts
-    st.markdown("### 📈 Production Charts")
-    plot_production_charts(production_df)
-    
-    # Export Data
-    st.markdown("---")
-    st.download_button(
-        label="📥 Download Production Data",
-        data=production_df.to_csv(index=False),
-        file_name="biogas_production_schedule.csv",
-        mime="text/csv"
-    )
+                f"{pred_row['Cumulative Production (mL)']:.0f}mL"
+            )
+        
+        # Date Timeline
+        st.subheader("📅 Production Timeline")
+        timeline_df = production_df.copy()
+        timeline_df['Date'] = [start_date + timedelta(days=int(x)-1) for x in timeline_df['Day']]
+        
+        # Display dataframe with formatting
+        st.dataframe(
+            timeline_df[['Date', 'Substrate (g)', 'Daily Production (mL)', 
+                       'Cumulative Production (mL)', 'Status']].set_index('Date'),
+            use_container_width=True
+        )
+        
+        # Interactive Charts
+        st.subheader("📈 Production Charts")
+        
+        tab1, tab2 = st.tabs(["Daily Production", "Cumulative Production"])
+        with tab1:
+            st.area_chart(production_df, x='Day', y='Daily Production (mL)')
+        with tab2:
+            st.line_chart(production_df, x='Day', y='Cumulative Production (mL)')
+        
+        # Export Data
+        st.markdown("---")
+        csv = production_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="📥 Download Production Data (CSV)",
+            data=csv,
+            file_name="biogas_production.csv",
+            mime="text/csv"
+        )
+        
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.info("Please check your inputs and try again.")
 
 if __name__ == "__main__":
     main()
